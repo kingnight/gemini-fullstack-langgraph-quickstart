@@ -300,11 +300,16 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
 
     # 格式化答案和引用
     formatted_answer = result.content
+    
+    # 在正文中插入引用标记
     for source in unique_sources:
-        formatted_answer = formatted_answer.replace(
-            source["value"],
-            f"{source['short_url']}"
-        )
+        # 查找包含该URL的句子
+        sentences = formatted_answer.split('.')
+        for i, sentence in enumerate(sentences):
+            if source["value"] in sentence:
+                # 在句子末尾添加引用标记
+                sentences[i] = sentence.replace(source["value"], f"{source['short_url']}")
+        formatted_answer = '.'.join(sentences)
 
     # 添加引用部分
     references = "\n\n## 引用来源\n"
