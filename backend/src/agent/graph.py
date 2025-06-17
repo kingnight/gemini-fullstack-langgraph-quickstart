@@ -7,7 +7,9 @@ from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
 from langchain_core.runnables import RunnableConfig
-from google.genai import Client
+from langchain_openai import ChatOpenAI
+from tavily import TavilyClient
+from utils.log import debug,info,error
 
 from agent.state import (
     OverallState,
@@ -23,7 +25,6 @@ from agent.prompts import (
     reflection_instructions,
     answer_instructions,
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
     get_citations,
     get_research_topic,
@@ -33,12 +34,14 @@ from agent.utils import (
 
 load_dotenv()
 
-if os.getenv("GEMINI_API_KEY") is None:
-    raise ValueError("GEMINI_API_KEY is not set")
+if os.getenv("OPENROUTER_API_KEY") is None:
+    raise ValueError("OPENROUTER_API_KEY is not set")
 
-# Used for Google Search API
-genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+if os.getenv("TAVILY_API_KEY") is None:
+    raise ValueError("TAVILY_API_KEY is not set")
 
+# Initialize Tavily client
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 # Nodes
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
@@ -54,31 +57,55 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     Returns:
         Dictionary with state update, including search_query key containing the generated query
     """
+    debug(f"开始生成查询，当前状态: {state}")
     configurable = Configuration.from_runnable_config(config)
 
     # check for custom initial search query count
     if state.get("initial_search_query_count") is None:
         state["initial_search_query_count"] = configurable.number_of_initial_queries
 
-    # init Gemini 2.0 Flash
-    llm = ChatGoogleGenerativeAI(
+    # init LLM through OpenRouter
+    llm = ChatOpenAI(
         model=configurable.query_generator_model,
         temperature=1.0,
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1",
     )
     structured_llm = llm.with_structured_output(SearchQueryList)
 
-    # Format the prompt
+    # Format the prompt with length constraints
     current_date = get_current_date()
     formatted_prompt = query_writer_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state["messages"]),
         number_queries=state["initial_search_query_count"],
-    )
+    ) + "\n\n重要提示：每个查询的长度必须控制在400个字符以内，请确保查询简洁且包含关键信息。"
+
     # Generate the search queries
     result = structured_llm.invoke(formatted_prompt)
-    return {"query_list": result.query}
+
+    # 验证并优化查询长度
+    optimized_queries = []
+    for query in result.query:
+        if len(query) > 400:
+            # 如果查询过长，尝试提取关键信息
+            words = query.split()
+            optimized_query = ""
+            for word in words:
+                if len(optimized_query + " " + word) <= 400:
+                    optimized_query += " " + word if optimized_query else word
+                else:
+                    break
+            optimized_queries.append(optimized_query)
+        else:
+            optimized_queries.append(query)
+
+    debug(f"生成的查询列表: {optimized_queries}")
+    debug(f"生成理由: {result.rationale}")
+    return {
+        "query_list": optimized_queries
+    }
 
 
 def continue_to_web_research(state: QueryGenerationState):
@@ -93,9 +120,9 @@ def continue_to_web_research(state: QueryGenerationState):
 
 
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
-    """LangGraph node that performs web research using the native Google Search API tool.
+    """LangGraph node that performs web research using Tavily Search API.
 
-    Executes a web search using the native Google Search API tool in combination with Gemini 2.0 Flash.
+    Executes a web search using Tavily Search API to gather relevant information.
 
     Args:
         state: Current graph state containing the search query and research loop count
@@ -104,35 +131,49 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     Returns:
         Dictionary with state update, including sources_gathered, research_loop_count, and web_research_results
     """
-    # Configure
+    debug(f"开始网络搜索，查询: {state['search_query']}")
+    
+    # 配置 Tavily 客户端
     configurable = Configuration.from_runnable_config(config)
-    formatted_prompt = web_searcher_instructions.format(
-        current_date=get_current_date(),
-        research_topic=state["search_query"],
+    
+    # 执行搜索
+    search_result = tavily_client.search(
+        query=state["search_query"],
+        search_depth="advanced",  # 使用高级搜索以获得更相关的结果
+        max_results=5,  # 限制结果数量
+        include_raw_content=True  # 包含原始内容以便后续处理
     )
-
-    # Uses the google genai client as the langchain client doesn't return grounding metadata
-    response = genai_client.models.generate_content(
-        model=configurable.query_generator_model,
-        contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
-    )
-    # resolve the urls to short urls for saving tokens and time
-    resolved_urls = resolve_urls(
-        response.candidates[0].grounding_metadata.grounding_chunks, state["id"]
-    )
-    # Gets the citations and adds them to the generated text
-    citations = get_citations(response, resolved_urls)
-    modified_text = insert_citation_markers(response.text, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
-
+    
+    debug(f"搜索到 {len(search_result['results'])} 条结果")
+    
+    # 处理搜索结果
+    sources = []
+    formatted_results = []
+    for i, result in enumerate(search_result["results"], 1):
+        # 从URL中提取域名作为label
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(result["url"]).netloc
+            # 移除www.前缀
+            label = domain.replace("www.", "").split(".")[0]
+        except:
+            label = f"source{i}"
+            
+        # 添加来源
+        sources.append({
+            "value": result["url"],
+            "short_url": f"[{i}]",
+            "label": label
+        })
+        
+        # 格式化结果
+        formatted_result = f"{result['title']}\n\n{result['content']}\n\nSource: {result['url']}"
+        formatted_results.append(formatted_result)
+    
     return {
-        "sources_gathered": sources_gathered,
         "search_query": [state["search_query"]],
-        "web_research_result": [modified_text],
+        "web_research_result": formatted_results,
+        "sources_gathered": sources
     }
 
 
@@ -150,6 +191,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     Returns:
         Dictionary with state update, including search_query key containing the generated follow-up query
     """
+    debug(f"开始反思，当前研究循环次数: {state.get('research_loop_count', 0)}")
     configurable = Configuration.from_runnable_config(config)
     # Increment the research loop count and get the reasoning model
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
@@ -163,13 +205,18 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         summaries="\n\n---\n\n".join(state["web_research_result"]),
     )
     # init Reasoning Model
-    llm = ChatGoogleGenerativeAI(
+    llm = ChatOpenAI(
         model=reasoning_model,
         temperature=1.0,
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1",
     )
     result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
+
+    debug(f"反思结果 - 是否足够: {result.is_sufficient}")
+    debug(f"知识差距: {result.knowledge_gap}")
+    debug(f"后续查询: {result.follow_up_queries}")
 
     return {
         "is_sufficient": result.is_sufficient,
@@ -218,18 +265,8 @@ def evaluate_research(
 
 
 def finalize_answer(state: OverallState, config: RunnableConfig):
-    """LangGraph node that finalizes the research summary.
-
-    Prepares the final output by deduplicating and formatting sources, then
-    combining them with the running summary to create a well-structured
-    research report with proper citations.
-
-    Args:
-        state: Current graph state containing the running summary and sources gathered
-
-    Returns:
-        Dictionary with state update, including running_summary key containing the formatted final summary with sources
-    """
+    """LangGraph node that finalizes the research summary."""
+    debug("开始生成最终答案")
     configurable = Configuration.from_runnable_config(config)
     reasoning_model = state.get("reasoning_model") or configurable.reasoning_model
 
@@ -241,27 +278,51 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         summaries="\n---\n\n".join(state["web_research_result"]),
     )
 
-    # init Reasoning Model, default to Gemini 2.5 Flash
-    llm = ChatGoogleGenerativeAI(
+    # init Reasoning Model through OpenRouter
+    llm = ChatOpenAI(
         model=reasoning_model,
         temperature=0,
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1",
     )
     result = llm.invoke(formatted_prompt)
 
-    # Replace the short urls with the original urls and add all used urls to the sources_gathered
+    debug(f"生成的答案长度: {len(result.content)}")
+
+    # 获取唯一来源
     unique_sources = []
+    seen_urls = set()
     for source in state["sources_gathered"]:
-        if source["short_url"] in result.content:
-            result.content = result.content.replace(
-                source["short_url"], source["value"]
-            )
+        if source["value"] not in seen_urls:
+            seen_urls.add(source["value"])
             unique_sources.append(source)
 
+    # 格式化答案和引用
+    formatted_answer = result.content
+    for source in unique_sources:
+        formatted_answer = formatted_answer.replace(
+            source["value"],
+            f"{source['short_url']}"
+        )
+
+    # 添加引用部分
+    references = "\n\n## 引用来源\n"
+    for source in unique_sources:
+        references += f"{source['short_url']}: {source['value']}\n"
+
+    final_answer = formatted_answer + references
+
+    debug(f"最终使用的来源数量: {len(unique_sources)}")
+    debug(f"结果: {final_answer}")
+    debug(f"引用来源: {unique_sources}")
+
     return {
-        "messages": [AIMessage(content=result.content)],
-        "sources_gathered": unique_sources,
+        **state,
+        "messages": [
+            *state["messages"],
+            AIMessage(content=final_answer)
+        ]
     }
 
 

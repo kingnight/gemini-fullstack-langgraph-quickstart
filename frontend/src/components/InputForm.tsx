@@ -26,7 +26,7 @@ export const InputForm: React.FC<InputFormProps> = ({
 }) => {
   const [internalInputValue, setInternalInputValue] = useState("");
   const [effort, setEffort] = useState("medium");
-  const [model, setModel] = useState("gemini-2.5-flash-preview-04-17");
+  const [model, setModel] = useState("google/gemini-2.5-flash-preview");
 
   const handleInternalSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -137,7 +137,7 @@ export const InputForm: React.FC<InputFormProps> = ({
               </SelectTrigger>
               <SelectContent className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer">
                 <SelectItem
-                  value="gemini-2.0-flash"
+                  value="google/gemini-2.0-flash-001"
                   className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
                 >
                   <div className="flex items-center">
@@ -145,7 +145,7 @@ export const InputForm: React.FC<InputFormProps> = ({
                   </div>
                 </SelectItem>
                 <SelectItem
-                  value="gemini-2.5-flash-preview-04-17"
+                  value="google/gemini-2.5-flash-preview-05-20"
                   className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
                 >
                   <div className="flex items-center">
@@ -153,7 +153,7 @@ export const InputForm: React.FC<InputFormProps> = ({
                   </div>
                 </SelectItem>
                 <SelectItem
-                  value="gemini-2.5-pro-preview-05-06"
+                  value="google/gemini-2.5-pro-preview"
                   className="hover:bg-neutral-600 focus:bg-neutral-600 cursor-pointer"
                 >
                   <div className="flex items-center">

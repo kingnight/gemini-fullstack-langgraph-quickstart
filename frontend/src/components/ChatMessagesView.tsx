@@ -241,6 +241,13 @@ export function ChatMessagesView({
 }: ChatMessagesViewProps) {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
+  console.log('ChatMessagesView props:', {  // 添加调试日志
+    messages,
+    isLoading,
+    liveActivityEvents,
+    historicalActivities
+  });
+
   const handleCopy = async (text: string, messageId: string) => {
     try {
       await navigator.clipboard.writeText(text);

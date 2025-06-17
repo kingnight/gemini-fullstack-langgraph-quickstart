@@ -30,11 +30,21 @@ export default function App() {
       console.log(event);
     },
     onUpdateEvent: (event: any) => {
+      console.log('Received event:', event);
       let processedEvent: ProcessedEvent | null = null;
       if (event.generate_query) {
+        // 提取查询列表和理由
+        const queries = event.generate_query.query || [];
+        const rationale = event.generate_query.rationale || "";
+        
+        // 格式化显示内容
+        const formattedQueries = queries.map((q: string, index: number) => 
+          `${index + 1}. ${q}`
+        ).join('\n');
+        
         processedEvent = {
           title: "Generating Search Queries",
-          data: event.generate_query.query_list.join(", "),
+          data: `搜索查询：\n${formattedQueries}\n\n理由：${rationale}`,
         };
       } else if (event.web_research) {
         const sources = event.web_research.sources_gathered || [];
@@ -54,9 +64,7 @@ export default function App() {
           title: "Reflection",
           data: event.reflection.is_sufficient
             ? "Search successful, generating final answer."
-            : `Need more information, searching for ${event.reflection.follow_up_queries?.join(
-                ", "
-              ) || "additional information"}`,
+            : `Need more information, searching for ${(event.reflection.follow_up_queries || []).join(", ")}`,
         };
       } else if (event.finalize_answer) {
         processedEvent = {
@@ -66,6 +74,7 @@ export default function App() {
         hasFinalizeEventOccurredRef.current = true;
       }
       if (processedEvent) {
+        console.log('Processed event:', processedEvent);
         setProcessedEventsTimeline((prevEvents) => [
           ...prevEvents,
           processedEvent!,
