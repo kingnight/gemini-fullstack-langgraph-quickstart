@@ -33,9 +33,20 @@ export default function App() {
       console.log('Received event:', event);
       let processedEvent: ProcessedEvent | null = null;
       if (event.generate_query) {
-        // 提取查询列表和理由
-        const queries = event.generate_query.query || [];
-        const rationale = event.generate_query.rationale || "";
+        // 处理两种可能的数据格式
+        let queries = [];
+        let rationale = "";
+        
+        if (event.generate_query.query_list) {
+          // 新格式：query_list 是包含 {query, rationale} 对象的数组
+          const queryList = event.generate_query.query_list || [];
+          queries = queryList.map((item: any) => item.query || "");
+          rationale = queryList.length > 0 ? queryList[0].rationale || "" : "";
+        } else if (event.generate_query.query) {
+          // 旧格式：直接有 query 数组和 rationale
+          queries = event.generate_query.query || [];
+          rationale = event.generate_query.rationale || "";
+        }
         
         // 格式化显示内容
         const formattedQueries = queries.map((q: string, index: number) => 
@@ -60,11 +71,29 @@ export default function App() {
           }.`,
         };
       } else if (event.reflection) {
+        const isSufficient = event.reflection.is_sufficient;
+        const followUpQueries = event.reflection.follow_up_queries || [];
+        const knowledgeGap = event.reflection.knowledge_gap || "";
+        
+        let data = "";
+        if (isSufficient) {
+          data = "Search successful, generating final answer.";
+        } else {
+          // 限制显示的查询数量，避免过长
+          const displayQueries = followUpQueries.slice(0, 3); // 只显示前3个
+          const queryText = displayQueries.length > 0 
+            ? displayQueries.join(", ")
+            : "additional information";
+          
+          data = `Need more information, searching for: ${queryText}`;
+          if (followUpQueries.length > 3) {
+            data += ` (and ${followUpQueries.length - 3} more queries)`;
+          }
+        }
+        
         processedEvent = {
           title: "Reflection",
-          data: event.reflection.is_sufficient
-            ? "Search successful, generating final answer."
-            : `Need more information, searching for ${(event.reflection.follow_up_queries || []).join(", ")}`,
+          data: data,
         };
       } else if (event.finalize_answer) {
         processedEvent = {
